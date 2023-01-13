@@ -9,13 +9,18 @@ import (
 )
 
 type AppBuilder struct {
-	context     context.Context
-	client      *client.Client
-	containerID string
+	config  *Config
+	context context.Context
+	client  *client.Client
 }
 
 func NewAppBuilder() *AppBuilder {
 	return &AppBuilder{}
+}
+
+func (b *AppBuilder) Config(config *Config) *AppBuilder {
+	b.config = config
+	return b
 }
 
 func (b *AppBuilder) Context(context context.Context) *AppBuilder {
@@ -28,16 +33,11 @@ func (b *AppBuilder) Client(client *client.Client) *AppBuilder {
 	return b
 }
 
-func (b *AppBuilder) ContainerID(containerID string) *AppBuilder {
-	b.containerID = containerID
-	return b
-}
-
 func (b *AppBuilder) Build() (*App, error) {
 	r := &App{
-		context:     b.context,
-		client:      b.client,
-		containerID: b.containerID,
+		config:  b.config,
+		context: b.context,
+		client:  b.client,
 	}
 	ret_construct0 := r.construct()
 	return r, ret_construct0

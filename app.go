@@ -10,20 +10,22 @@ import (
 	"github.com/lainio/err2"
 	"github.com/lainio/err2/assert"
 	"github.com/lainio/err2/try"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
-	"os"
+	"github.com/sirupsen/logrus"
 	"time"
 )
 
 //go:generate gonstructor --type=App --constructorTypes=builder -init construct -propagateInitFuncReturns
 type App struct {
-	context     context.Context
-	client      *client.Client
-	containerID string
+	config  *Config
+	context context.Context
+	client  *client.Client
+	log     *logrus.Entry `gonstructor:"-"`
 }
 
 func (x *App) construct() error {
+	if x.config == nil {
+		x.config = GetConfig()
+	}
 	if x.context == nil {
 		x.context = context.Background()
 	}
@@ -33,24 +35,27 @@ func (x *App) construct() error {
 			return err
 		}
 	}
-	if x.containerID == "" {
-		x.containerID = os.Getenv("CONTAINER_ID")
-		if x.containerID == "" {
-			return errors.New("containerID not found")
-		}
+	logger := logrus.New()
+	if level, err := logrus.ParseLevel(x.config.LogLevel); err != nil {
+		return err
+	} else {
+		logger.SetLevel(level)
 	}
+	x.log = logger.WithField("containerID", x.config.ContainerID)
 	return nil
 }
 
 func (x *App) Run() (_err error) {
 	defer err2.Handle(&_err)
+	x.log.Info("starting...")
 	task := try.To1(x.task())
 	stackName := task.Spec.ContainerSpec.Labels["com.docker.stack.namespace"]
-	assert.NotEmpty(stackName, fmt.Sprintf("stackName not found. containerID:%v", x.containerID))
-	var mountPaths []string
+	assert.NotEmpty(stackName, fmt.Sprintf("stackName not found. containerID:%v", x.config.ContainerID))
+	x.log.WithField("stackName", stackName).Info("discovered stackName")
+	var mountMappings []string
 	for _, mount := range task.Spec.ContainerSpec.Mounts {
-		if mountPath := x.localMountPath(mount); mountPath != "" {
-			mountPaths = append(mountPaths, mountPath)
+		if mountMapping := x.mountMapping(mount); mountMapping != "" {
+			mountMappings = append(mountMappings, mountMapping)
 		}
 	}
 	since := time.Now()
@@ -59,10 +64,10 @@ func (x *App) Run() (_err error) {
 		if modCount, err := volumeInit.Run(); err != nil {
 			return err
 		} else {
-			log.WithField("modified", modCount).Debug("init complete")
+			x.log.WithField("modified", modCount).Debug("init complete")
 		}
 		since = time.Now()
-		time.Sleep(time.Second * 5)
+		time.Sleep(x.config.PollInterval)
 	}
 }
 
@@ -75,27 +80,30 @@ func (x *App) task() (swarm.Task, error) {
 		if task.Status.ContainerStatus == nil {
 			continue
 		}
-		if x.containerID == task.Status.ContainerStatus.ContainerID {
+		if x.config.ContainerID == task.Status.ContainerStatus.ContainerID {
 			return task, nil
 		}
 	}
-	return swarm.Task{}, fmt.Errorf("task not found. containerID:%v", x.containerID)
+	return swarm.Task{}, fmt.Errorf("task not found. containerID:%v", x.config.ContainerID)
 }
 
-func (x *App) localMountPath(mount mount.Mount) string {
+func (x *App) mountMapping(mount mount.Mount) *MountMapping {
+	if mount.Target == "" {
+		return nil
+	}
 	if mount.VolumeOptions == nil {
-		return ""
+		return nil
 	}
 	if mount.VolumeOptions.DriverConfig == nil {
-		return ""
+		return nil
 	}
 	driverConfig := mount.VolumeOptions.DriverConfig
 	if "local" != driverConfig.Name {
-		return ""
+		return nil
 	}
-	if device, ok := driverConfig.Options["device"]; !ok {
-		return ""
+	if device, ok := driverConfig.Options["device"]; !ok || device == "" {
+		return nil
 	} else {
-		return device
+		return &MountMapping{mount.Target, device}
 	}
 }

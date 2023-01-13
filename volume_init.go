@@ -8,7 +8,7 @@ import (
 	"github.com/lainio/err2"
 	"github.com/lainio/err2/try"
 	errors2 "github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,18 +17,18 @@ import (
 
 //go:generate gonstructor --type=VolumeInit --constructorTypes=builder -init construct -propagateInitFuncReturns
 type VolumeInit struct {
-	app        *App
-	stackName  string
-	mountPaths []string
-	since      time.Time
-	logFields  log.Fields `gonstructor:"-"`
+	app           *App
+	stackName     string
+	mountMappings []MountMapping
+	since         time.Time
+	log           *logrus.Entry `gonstructor:"-"`
 }
 
 func (x *VolumeInit) construct() {
-	x.logFields = log.Fields{
+	x.log = x.app.log.WithFields(logrus.Fields{
 		"stackName":  x.stackName,
-		"mountPaths": x.mountPaths,
-	}
+		"mountPaths": x.mountMappings,
+	})
 }
 
 func (x *VolumeInit) Run() (_ int, _err error) {
@@ -50,12 +50,12 @@ func (x *VolumeInit) Run() (_ int, _err error) {
 			continue
 		}
 		for _, mount := range task.Spec.ContainerSpec.Mounts {
-			path := x.app.localMountPath(mount)
-			if path == "" {
+			mm := x.app.mountMapping(mount)
+			if mm == nil {
 				continue
 			}
-			if mod, err := x.init(path); err != nil {
-				return modCount, errors2.Wrap(err, fmt.Sprintf("%v", x.logFields))
+			if mod, err := x.init(mm.device); err != nil {
+				return modCount, errors2.Wrap(err, fmt.Sprintf("%v", x.log.Data))
 			} else if mod {
 				modCount++
 			}
@@ -69,18 +69,18 @@ func (x *VolumeInit) init(path string) (bool, error) {
 		return false, err
 	}
 	if _, err := os.Stat(path); err == nil {
-		log.WithFields(x.logFields).WithField("path", path).Debug("skipping")
+		x.log.WithField("path", path).Debug("skipping")
 		return false, nil
 	}
 	if err := os.MkdirAll(path, os.ModePerm); err != nil {
 		return false, errors2.Wrap(err, fmt.Sprintf("mkdir failed. path:%v", path))
 	}
-	log.WithFields(x.logFields).WithField("path", path).Info("created")
+	x.log.WithField("path", path).Info("created")
 	return true, nil
 }
 
 func (x *VolumeInit) validatePath(path string) error {
-	for _, mountPath := range x.mountPaths {
+	for _, mountMapping := range x.mountMappings {
 		if mountPath == path {
 			return nil
 		}
