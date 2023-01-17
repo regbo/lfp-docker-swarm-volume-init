@@ -14,7 +14,6 @@ if (![string]::IsNullOrEmpty($TAG_APPEND)) {
 }
 $NOW = [math]::Round((Get-Date).ToFileTime() / 10000)
 try {
-
   Write-Output "building:${REPOSITORY} in $DIR"
   Set-Location $DIR
   docker build . `
