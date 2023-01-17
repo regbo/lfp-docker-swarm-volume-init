@@ -3,26 +3,32 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/docker/distribution/uuid"
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/lainio/err2"
+	"github.com/lainio/err2/assert"
 	"github.com/lainio/err2/try"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/exp/slices"
-	"os/exec"
+	"io"
+	"strings"
 	"time"
 )
 
+const minInterval = time.Millisecond * 250
+
 //go:generate gonstructor --type=App --constructorTypes=builder -init construct -propagateInitFuncReturns
 type App struct {
-	config  *Config
-	context context.Context
-	client  *client.Client
-	log     *logrus.Logger `gonstructor:"-"`
+	config          *Config
+	context         context.Context
+	client          *client.Client
+	image           string
+	devicePathCache *ttlcache.Cache[string, bool] `gonstructor:"-"`
+	log             *logrus.Logger                `gonstructor:"-"`
 }
 
 func (x *App) construct() (_err error) {
@@ -30,9 +36,8 @@ func (x *App) construct() (_err error) {
 	if x.config == nil {
 		x.config = GetConfig()
 	}
-	minPollInterval := time.Millisecond * 250
-	if x.config.PollInterval < minPollInterval {
-		return fmt.Errorf("poll interval must be >=%v", minPollInterval)
+	for key, interval := range map[string]time.Duration{"PollInterval": x.config.PollInterval, "MkdirInterval": x.config.MkdirInterval} {
+		assert.That(interval >= minInterval, fmt.Sprintf("%v(%v) must be >=%v", key, interval, minInterval))
 	}
 	if x.context == nil {
 		x.context = context.Background()
@@ -40,27 +45,23 @@ func (x *App) construct() (_err error) {
 	if x.client == nil {
 		x.client = try.To1(client.NewClientWithOpts(client.FromEnv))
 	}
+	containerJSON := try.To1(x.client.ContainerInspect(x.context, x.config.ContainerID))
+	x.image = containerJSON.Image
+	x.devicePathCache = ttlcache.New[string, bool](ttlcache.WithDisableTouchOnHit[string, bool]())
 	x.log = logrus.New()
 	x.log.SetLevel(try.To1(logrus.ParseLevel(x.config.LogLevel)))
 	return nil
 }
 
 func (x *App) Run() error {
-	logFields := logrus.Fields{}
-	if x.log.IsLevelEnabled(logrus.DebugLevel) {
-		for k, v := range x.config.Map() {
-			logFields[k] = v
-		}
-	}
-	x.log.WithFields(logFields).Info("starting")
-	var lastPoll = time.Now().Add(-1 * x.config.PollSince)
+	x.log.WithFields(x.config.LogFields()).Info("starting")
 	for i := 0; ; i++ {
 		logEntry := x.log.WithField("pass", i)
 		logEntry.Info("poll started")
-		since := lastPoll
-		lastPoll = time.Now()
-		modCount, err := x.poll(since)
-		logEntry = logEntry.WithField("modCount", modCount)
+		devicePaths, err := x.poll()
+		if len(devicePaths) > 0 {
+			logEntry = logEntry.WithField("devicePaths", devicePaths)
+		}
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("poll error:%v", logEntry.Data))
 		}
@@ -69,133 +70,152 @@ func (x *App) Run() error {
 	}
 }
 
-func (x *App) poll(since time.Time) (_ int, _err error) {
+func (x *App) poll() (_ []string, _err error) {
 	defer err2.Handle(&_err)
-	devicePaths := try.To1(x.devicePaths(since))
-	devicePathCount := len(devicePaths)
-	if devicePathCount == 0 {
-		return 0, nil
-	}
-	dockerRunCommand := "docker run -t --rm --privileged"
-	for _, devicePath := range devicePaths {
-		dockerRunCommand += fmt.Sprintf(" -v %v:/mnt/volume_%v", devicePath, uuid.Generate())
-	}
-	dockerRunCommand += " alpine:latest sh -c \"echo container started\""
-	runLog := x.log.WithField("devicePaths", devicePaths)
-	if x.log.IsLevelEnabled(logrus.DebugLevel) {
-		runLog = runLog.WithField("dockerRunCommand", dockerRunCommand)
-	}
-	runLog.Info("docker run started")
-	cmd := exec.Command("sh", "-c", dockerRunCommand)
-	stdout, err := cmd.Output()
-	outputLog := x.log.WithField("stdout", string(stdout))
-	if err != nil {
-		outputLog = outputLog.WithField("err", err)
-	}
-	outputLog.Debug("docker run complete")
-	if err != nil {
-		return 0, err
-	}
-	return devicePathCount, nil
-}
-func (x *App) devicePaths(since time.Time) (_ []string, _err error) {
-	defer err2.Handle(&_err)
+	volumes := try.To1(x.client.VolumeList(x.context, filters.Args{}))
 	var devicePaths []string
-	containers := try.To1(x.client.ContainerList(x.context, types.ContainerListOptions{
-		All: true,
-	}))
-	for _, container := range containers {
-		for _, devicePath := range x.containerDevicePaths(since, container) {
-			if !slices.Contains(devicePaths, devicePath) {
-				devicePaths = append(devicePaths, devicePath)
+	if volumes.Volumes != nil {
+		for _, volume := range volumes.Volumes {
+			if "local" != volume.Driver {
+				continue
 			}
-		}
-	}
-	//error if not swarm mode
-	tasks, _ := x.client.TaskList(x.context, types.TaskListOptions{})
-	var nodeID string
-	for _, task := range tasks {
-		if task.Status.ContainerStatus != nil && task.Status.ContainerStatus.ContainerID == x.config.ContainerID {
-			nodeID = task.NodeID
-			break
-		}
-	}
-	if nodeID != "" {
-		for _, task := range tasks {
-			for _, devicePath := range x.taskDevicePaths(since, nodeID, task) {
-				if !slices.Contains(devicePaths, devicePath) {
-					devicePaths = append(devicePaths, devicePath)
-				}
+			devicePath, ok := volume.Options["device"]
+			if !ok || devicePath == "" || slices.Contains(devicePaths, devicePath) {
+				continue
 			}
+			devicePaths = append(devicePaths, devicePath)
 		}
 	}
-	slices.Sort(devicePaths)
+	devicePaths = try.To1(x.filterDevicePaths(devicePaths))
+	try.To(x.mkDevicePaths(devicePaths))
 	return devicePaths, nil
 }
 
-func (x *App) containerDevicePaths(since time.Time, container types.Container) []string {
-	log := x.log.WithField("containerID", container.ID)
-	if x.config.ContainerID == container.ID {
-		log.Trace("self lookup, skipping")
-		return nil
+func (x *App) filterDevicePaths(devicePaths []string) (_ []string, _err error) {
+	defer err2.Handle(&_err)
+	for i := 0; i < len(devicePaths); i++ {
+		devicePath := devicePaths[i]
+		item := x.devicePathCache.Get(devicePath)
+		if item != nil {
+			devicePaths = slices.Delete(devicePaths, i, i+1)
+			i--
+		}
 	}
-	if "running" == container.State {
-		log.Trace("running state, skipping")
-		return nil
+	if len(devicePaths) == 0 {
+		return nil, nil
 	}
-	createdAt := time.Unix(container.Created, 0)
-	if createdAt.Before(since) {
-		log.Trace("stale container, skipping")
-		return nil
+	slices.Sort(devicePaths)
+	var printCommand string
+	for _, devicePath := range devicePaths {
+		printCommand += fmt.Sprintf("DIR='%v' && [ -d \"${DIR}\" ] && echo -n \"${DIR}|\";", devicePath)
 	}
-	containerJSON, err := x.client.ContainerInspect(x.context, container.ID)
-	if err != nil {
-		log.WithError(err).Debug("inspect failed, skipping")
-		return nil
+	command := []string{"-t", "1", "-m", "-u", "-n", "-i", "sh", "-c", printCommand}
+	buf := try.To1(x.containerRun("nsenter", command, map[string]string{"/var/run/docker.sock": "/var/run/docker.sock"}, true))
+	for _, devicePath := range strings.Split(string(buf), "|") {
+		index := slices.Index(devicePaths, devicePath)
+		if index >= 0 {
+			devicePaths = slices.Delete(devicePaths, index, index+1)
+			x.devicePathCache.Set(devicePath, false, x.config.MkdirInterval)
+		}
 	}
-	if containerJSON.HostConfig == nil {
-		log.Debug("HostConfig not found, skipping")
-		return nil
-	}
-	return x.mountDevicePaths(containerJSON.HostConfig.Mounts)
+	return devicePaths, nil
 }
 
-func (x *App) taskDevicePaths(since time.Time, nodeID string, task swarm.Task) []string {
-	log := x.log.WithField("nodeID", nodeID).WithField("taskID", task.ID)
-	if nodeID != task.NodeID {
-		log.Trace("nodeID differs, skipping")
+func (x *App) mkDevicePaths(devicePaths []string) (_err error) {
+	defer err2.Handle(&_err)
+	if len(devicePaths) == 0 {
 		return nil
 	}
-	if task.Status.ContainerStatus != nil && task.Status.ContainerStatus.ContainerID == x.config.ContainerID {
-		log.Trace("self lookup, skipping")
-		return nil
+	bindMounts := make(map[string]string)
+	for i, devicePath := range devicePaths {
+		bindMounts[devicePath] = fmt.Sprintf("/mnt/v_%v", i)
 	}
-	if task.Status.State != swarm.TaskStateRejected && task.Status.State != swarm.TaskStateFailed {
-		log.Trace("normal state, skipping")
-		return nil
-	}
-	if task.CreatedAt.Before(since) {
-		log.Trace("stale task, skipping")
-		return nil
-	}
-	if task.Spec.ContainerSpec == nil {
-		log.Debug("ContainerSpec not found, skipping")
-		return nil
-	}
-	return x.mountDevicePaths(task.Spec.ContainerSpec.Mounts)
+	_, err := x.containerRun("/bin/sh", []string{"-c", "exit 0"}, bindMounts, false)
+	return err
 }
 
-func (x *App) mountDevicePaths(mounts []mount.Mount) []string {
-	var devicePaths []string
-	for _, mount := range mounts {
-		if mount.VolumeOptions == nil || mount.VolumeOptions.DriverConfig == nil || "local" != mount.VolumeOptions.DriverConfig.Name {
-			continue
-		}
-		devicePath, ok := mount.VolumeOptions.DriverConfig.Options["device"]
-		if !ok {
-			continue
-		}
-		devicePaths = append(devicePaths, devicePath)
+func (x *App) containerRun(entrypoint string, command []string, bindMounts map[string]string, pidModeHost bool) (_ []byte, _err error) {
+	defer err2.Handle(&_err)
+	var binds []string
+	for host, container := range bindMounts {
+		binds = append(binds, fmt.Sprintf("%v:%v", host, container))
 	}
-	return devicePaths
+	hostConfig := &container.HostConfig{
+		Privileged: true,
+		Binds:      binds,
+	}
+	if pidModeHost {
+		hostConfig.PidMode = "host"
+	}
+	createdContainer := try.To1(x.client.ContainerCreate(x.context, &container.Config{
+		Image:      x.image,
+		Entrypoint: []string{entrypoint},
+		Cmd:        command,
+	}, hostConfig, nil, nil, ""))
+	logEntry := x.log.WithField("containerID", createdContainer.ID)
+	logEntry.Debug("container created")
+	defer func() {
+		if err := x.client.ContainerRemove(x.context, createdContainer.ID, types.ContainerRemoveOptions{}); err != nil {
+			panic(err)
+		}
+	}()
+	try.To(x.client.ContainerStart(x.context, createdContainer.ID, types.ContainerStartOptions{}))
+	conditionChan, errorChan := x.client.ContainerWait(x.context, createdContainer.ID, container.WaitConditionNotRunning)
+	var ok bool
+	for !ok {
+		select {
+		case <-conditionChan:
+			ok = true
+		case err := <-errorChan:
+			return nil, err
+		}
+	}
+	if err := x.containerError(createdContainer.ID); err != nil {
+		return nil, err
+	}
+	return x.containerLogs(createdContainer.ID)
+}
+
+func (x *App) containerLogs(containerID string) (_ []byte, _err error) {
+	defer err2.Handle(&_err)
+	reader := try.To1(x.client.ContainerLogs(x.context, containerID, types.ContainerLogsOptions{
+		Timestamps: false,
+		Details:    false,
+		ShowStdout: true,
+		ShowStderr: true,
+	}))
+	defer func() {
+		_ = reader.Close()
+	}()
+	if _, err := io.ReadFull(reader, make([]byte, 8)); err != nil {
+		if io.EOF == err || io.ErrUnexpectedEOF == err {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if buf, err := io.ReadAll(reader); err != nil {
+		return nil, err
+	} else {
+		return buf, nil
+	}
+}
+
+func (x *App) containerError(containerID string) (_err error) {
+	defer err2.Handle(&_err)
+	containerInspect := try.To1(x.client.ContainerInspect(x.context, containerID))
+	if containerInspect.State == nil {
+		return errors.New(fmt.Sprintf("state not found"))
+	}
+	if containerInspect.State.ExitCode == 0 {
+		return nil
+	}
+	if containerInspect.State.Error != "" {
+		return errors.New(containerInspect.State.Error)
+	}
+	out := string(try.To1(x.containerLogs(containerID)))
+	out = strings.TrimSuffix(out, "\n")
+	if out != "" {
+		return errors.New(out)
+	}
+	return errors.New(fmt.Sprintf("exit code:%v", containerInspect.State.ExitCode))
 }

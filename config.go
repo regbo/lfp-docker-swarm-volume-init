@@ -3,15 +3,16 @@ package main
 import (
 	"encoding/json"
 	"github.com/caarlos0/env/v6"
+	"github.com/sirupsen/logrus"
 	"sync"
 	"time"
 )
 
 type Config struct {
-	ContainerID  string        `env:"CONTAINER_ID,notEmpty"`
-	PollInterval time.Duration `env:"POLL_INTERVAL" envDefault:"3s"`
-	PollSince    time.Duration `env:"POLL_SINCE" envDefault:"1m"`
-	LogLevel     string        `env:"LOG_LEVEL" envDefault:"INFO"`
+	ContainerID   string        `env:"CONTAINER_ID,notEmpty"`
+	PollInterval  time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
+	MkdirInterval time.Duration `env:"MKDIR_INTERVAL" envDefault:"30s"`
+	LogLevel      string        `env:"LOG_LEVEL" envDefault:"INFO"`
 }
 
 var (
@@ -30,14 +31,14 @@ func GetConfig() *Config {
 	return &_configInstance
 }
 
-func (x *Config) Map() map[string]any {
+func (x *Config) LogFields() logrus.Fields {
 	if buf, err := json.Marshal(x); err != nil {
 		panic(err)
 	} else {
-		var result map[string]any
-		if err = json.Unmarshal(buf, &result); err != nil {
+		fields := logrus.Fields{}
+		if err = json.Unmarshal(buf, &fields); err != nil {
 			panic(err)
 		}
-		return result
+		return fields
 	}
 }
