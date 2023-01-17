@@ -26,7 +26,7 @@ type App struct {
 	config          *Config
 	context         context.Context
 	client          *client.Client
-	image           string
+	image           string                        `gonstructor:"-"`
 	devicePathCache *ttlcache.Cache[string, bool] `gonstructor:"-"`
 	log             *logrus.Logger                `gonstructor:"-"`
 }
