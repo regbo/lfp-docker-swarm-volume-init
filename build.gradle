@@ -1,0 +1,42 @@
+plugins {
+    id 'java'
+    id("io.freefair.lombok") version "8.1.0"
+    id 'com.google.cloud.tools.jib' version '3.3.2'
+}
+
+ext {
+    docker_java_version = '3.3.2'
+}
+
+
+group = 'com.lfp'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+    maven { url "https://jitpack.io" }
+}
+
+
+jib {
+    to.image 'regbo/lfp-docker-swarm-volume-init'
+}
+
+dependencies {
+    implementation platform('io.projectreactor:reactor-bom:2022.0.9')
+    implementation "com.github.docker-java:docker-java:${docker_java_version}"
+    implementation "com.github.docker-java:docker-java-transport-httpclient5:${docker_java_version}"
+    implementation 'org.slf4j:slf4j-simple:2.0.7'
+    implementation 'org.apache.commons:commons-lang3:3.13.0'
+    implementation 'one.util:streamex:0.8.1'
+    implementation 'com.machinezoo.noexception:noexception:1.9.0'
+    implementation 'com.github.robinfriedli:ThreadPool:1.2.0'
+    implementation 'io.projectreactor:reactor-core'
+
+    testImplementation platform('org.junit:junit-bom:5.9.1')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+    useJUnitPlatform()
+}
