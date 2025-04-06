@@ -1,13 +1,13 @@
 plugins {
     id 'java'
     id("io.freefair.lombok") version "8.1.0"
-    id 'com.google.cloud.tools.jib' version '3.3.2'
+    id 'com.google.cloud.tools.jib' version '3.4.5'
 }
 
 ext {
     docker_java_version = '3.3.2'
+    timestamp_tag = System.currentTimeMillis().toString()
 }
-
 
 group = 'com.lfp'
 version = '1.0-SNAPSHOT'
@@ -17,9 +17,11 @@ repositories {
     maven { url "https://jitpack.io" }
 }
 
-
 jib {
-    to.image 'regbo/lfp-docker-swarm-volume-init'
+    to {
+        image = 'regbo/lfp-docker-swarm-volume-init'
+        tags = ['latest', project.version, System.currentTimeMillis()].collect { it.toString() }
+    }
 }
 
 dependencies {
