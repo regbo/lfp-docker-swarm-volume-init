@@ -16,5 +16,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /etc/passwd /etc/passwd
+COPY --from=build /etc/group /etc/group
 COPY --from=build /out/volume-init /volume-init
 ENTRYPOINT ["/volume-init"]
