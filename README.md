@@ -11,8 +11,10 @@ The daemon watches local Docker container and volume events. For a recognized `f
 - Processes only local-volume errors containing `no such file or directory`.
 - Requires the parsed paths to match the failed container or task definition.
 - Deduplicates concurrent repairs for the same host path.
-- Times out repairs and cleans up temporary containers even during shutdown.
+- Times out repairs and combines Docker auto-removal with explicit cleanup during shutdown.
 - Labels repair containers with `com.lfp.docker.swarm.volume-init=true`.
+
+Like the Java implementation, the daemon only creates a missing directory on the Docker node where it is running. It does not change ownership or permissions. Run an initializer task on every node whose local paths it must repair; a manager-only deployment cannot repair worker-local bind paths.
 
 ## Configuration
 

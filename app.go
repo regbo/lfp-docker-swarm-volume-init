@@ -222,6 +222,7 @@ func (a *app) repair(ctx context.Context, imageID, hostPath string) (returnErr e
 		},
 		HostConfig: &container.HostConfig{
 			Privileged: true,
+			AutoRemove: true,
 			// Docker's legacy bind syntax creates a missing source directory; --mount does not.
 			Binds: []string{hostPath + ":" + containerPath},
 		},
@@ -237,7 +238,7 @@ func (a *app) repair(ctx context.Context, imageID, hostPath string) (returnErr e
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), a.config.cleanupTimeout)
 		defer cleanupCancel()
 		_, cleanupErr := a.docker.ContainerRemove(cleanupCtx, created.ID, client.ContainerRemoveOptions{Force: true})
-		if cleanupErr != nil && !errdefs.IsNotFound(cleanupErr) {
+		if cleanupErr != nil && !errdefs.IsNotFound(cleanupErr) && !errdefs.IsConflict(cleanupErr) {
 			cleanupErr = fmt.Errorf("remove temporary container %s: %w", created.ID, cleanupErr)
 			if returnErr == nil {
 				returnErr = cleanupErr
