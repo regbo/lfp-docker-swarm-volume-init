@@ -1,23 +1,17 @@
-# Stop on error
+param(
+    [string]$Ref = "main"
+)
+
 $ErrorActionPreference = "Stop"
 
-# Timestamp in milliseconds
-$timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-$imageName = "regbo/lfp-docker-swarm-volume-init"
-$tagLatest = "${imageName}:latest"
-$tagTimestamp = "${imageName}:$timestamp"
+if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+    throw "GitHub CLI is required. Install it and run 'gh auth login'."
+}
 
-Write-Host "Building image with Jib..."
-./gradlew jibDockerBuild
+gh workflow run ci-deploy.yml --ref $Ref
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to trigger the deployment workflow."
+}
 
-Write-Host "Tagging image..."
-docker tag $imageName $tagTimestamp
-docker tag $imageName $tagLatest
-
-Write-Host "Pushing to Docker Hub..."
-docker push $tagTimestamp
-docker push $tagLatest
-
-Write-Host "Done. Tags pushed:"
-Write-Host " - $tagLatest"
-Write-Host " - $tagTimestamp"
+Write-Host "Deployment requested for '$Ref'."
+Write-Host "Monitor it with: gh run watch"
